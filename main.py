@@ -1,16 +1,33 @@
-"""The Globe Courier — news-image-20261123 entry shipper.
+#!/usr/bin/env python3
+"""Entrypoint for The Globe Courier (make.fun news-image-20261123).
 
-Python 3.13, standard library only. Copies the composed entry.png
-beside this file to the grader's output directory. Deterministic:
-the same repository always writes the same bytes.
+Builds entry.png with build_courier.py (same directory) and copies it into
+$MAKEFUN_OUTPUT_DIR as entry.png. With no MAKEFUN_OUTPUT_DIR set, the copy
+goes to the current directory.
+
+Usage: python3 main.py
 """
-
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
-out_dir.mkdir(parents=True, exist_ok=True)
-shutil.copyfile(HERE / "entry.png", out_dir / "entry.png")
+
+def main() -> int:
+    target = HERE / "entry.png"
+    subprocess.run(
+        [sys.executable, str(HERE / "build_courier.py"), str(target)],
+        check=True,
+    )
+    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", ".")).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(target, out_dir / "entry.png")
+    print(f"wrote {out_dir / 'entry.png'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

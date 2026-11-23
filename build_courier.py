@@ -1,13 +1,20 @@
-"""The Globe Courier — compositor for news-image-20261123.
+#!/usr/bin/env python3
+"""The Globe Courier — a one-page broadsheet front page for 23 November 2026.
 
-Builds entry.png (1024x1024), a one-page broadsheet for Monday,
-23 November 2026, from three photo panels generated in-session plus
-typeset headlines. Run:  python3 build_courier.py [output-path]
-Deterministic: same inputs always produce the same bytes.
+Renders the make.fun news-image-20261123 entry: a 1024x1024 PNG broadsheet
+with a centred masthead, three photo stories across the top row (the lead
+story in the centre column), three text stories below, an IN BRIEF band and
+a sources footer.
 
-Design: charcoal + amber, centred masthead, three equal columns,
-lead story in the centre column topped by its photo panel.
+Inputs: the three photo panels in assets/ (WebP) and the story copy in this
+file (researched from the morning wires of 23 November 2026; see BUILD.md).
+
+The output is deterministic: fixed fonts, fixed geometry, no timestamps,
+no randomness — running the script twice yields byte-identical PNGs.
+
+Usage: python3 build_courier.py [output.png]   (default: entry.png)
 """
+from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -17,255 +24,343 @@ from PIL import Image, ImageDraw, ImageFont
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "assets"
 
-W = H = 1024
+PAGE_W, PAGE_H = 1024, 1024
 MARGIN = 28
-CONTENT = W - 2 * MARGIN
-COL = 304
-GUT = 28
+COL_W = 306
+GUTTER = 25
+CONTENT_W = PAGE_W - 2 * MARGIN  # 968
+PHOTO_H = 180
 
+# Palette — warm newsprint paper, charcoal ink, amber accent.
 PAPER = (247, 243, 234)
-INK = (32, 32, 34)
-CHARCOAL = (44, 44, 48)
-AMBER = (178, 114, 18)
-AMBER_DARK = (138, 86, 10)
-MUTED = (98, 94, 84)
-BODY = (58, 56, 50)
-FAINT = (205, 199, 186)
+INK = (26, 24, 20)
+CHARCOAL = (35, 32, 28)
+AMBER = (139, 92, 5)
+AMBER_RULE = (160, 110, 10)
+BODY_INK = (41, 38, 33)
+GREY = (110, 104, 92)
+HAIRLINE = (198, 191, 176)
 
-FONTS = "/usr/share/fonts/truetype/dejavu"
+MASTHEAD = "THE GLOBE COURIER"
+DATE_LINE = "MONDAY, 23 NOVEMBER 2026"
+DATE_TAIL = "  •  WORLD NEWS IN ONE PAGE"
+
+# ---------------------------------------------------------------- stories
+
+TOP_STORIES = [
+    {
+        "kicker": "STRAIT OF HORMUZ",
+        "photo": "media-generation-panel-hormuz-0-7f93a5ea-b615-43e0-a324-34b8ca01c55c.webp",
+        "caption": "A tanker in the Strait of Hormuz at dawn.",
+        "headline": "Two more tankers hit mines as the strait burns",
+        "body": (
+            "Two supertankers catch fire after striking naval mines east of "
+            "Hormuz on Sunday, and UK maritime authorities report projectile "
+            "strikes near Khasab. Attacks on shipping are at their highest "
+            "level since the war began."
+        ),
+    },
+    {
+        "kicker": "ANTALYA — LEAD STORY",
+        "photo": "media-generation-panel-antalya-0-99704f85-53f1-4232-8983-529e92c3f1d0.webp",
+        "caption": "The COP31 plenary hall in Antalya, emptying.",
+        "headline": "COP31 collapses: no deal on fossil fuels",
+        "body": (
+            "After two weeks and record overtime, the climate summit ends "
+            "without an overarching pact — the first such failure since "
+            "Copenhagen in 2009. The EU, the UK and island states reject a "
+            "text that never mentions fossil fuels."
+        ),
+    },
+    {
+        "kicker": "BENGHAZI",
+        "photo": "media-generation-panel-benghazi-0-3e4ad8ef-b714-417f-b2e8-f3f865e50440.webp",
+        "caption": "A warship listing in Benghazi harbour at dawn.",
+        "headline": "Russian warship sunk by sea drones off Libya",
+        "body": (
+            "The corvette Merkury capsizes and sinks after suspected "
+            "Ukrainian sea drones strike it in port; a second vessel is hit "
+            "hours later. Libya asks the UN to investigate."
+        ),
+    },
+]
+
+LOWER_STORIES = [
+    {
+        "kicker": "BRUSSELS",
+        "headline": "NATO meets today after Russian missiles land in Poland",
+        "body": (
+            "Prosecutors confirm all three objects that fell on Friday were "
+            "Russian Kh-101 cruise missiles. The North Atlantic Council holds "
+            "an emergency session in Brussels."
+        ),
+    },
+    {
+        "kicker": "SINALOA",
+        "headline": "Mexico captures ‘El Chapo Isidro’ in deadly raid",
+        "body": (
+            "FBI most-wanted fugitive Fausto Isidro Meza Flores is seized in "
+            "Guasave; 11 people are killed, four of them soldiers. US "
+            "intelligence helped plan the raid."
+        ),
+    },
+    {
+        "kicker": "KYIV REGION",
+        "headline": "Drone hits an apartment block; 11 missing in the rubble",
+        "body": (
+            "A Russian drone strikes a five-storey block in Dymer, north of "
+            "Kyiv, early on Sunday, killing two. Rescuers search for "
+            "survivors, including two children."
+        ),
+    },
+]
+
+BRIEF_ITEMS = [
+    ("GENEVA", "128 states agree to pursue rules on killer robots by 2028."),
+    ("JUBA", "24 civilians killed in fresh violence in South Sudan."),
+    ("CIKANDE", "Seven bodies recovered, dozens missing after a factory fire in Indonesia."),
+    ("OKINAWA", "Shuri Castle’s restored main hall opens, seven years after fire."),
+]
+
+SOURCES = "Sources: CNN • Reuters • Le Monde • AP • AFP • UKMTO • The Times"
+TAGLINE = "THE GLOBE COURIER — ONE DAY. ONE PAGE."
 
 
-def font(name, size):
-    try:
-        return ImageFont.truetype(str(Path(FONTS) / name), size)
-    except OSError:
-        return ImageFont.load_default(size)
+# ---------------------------------------------------------------- fonts
+
+def _find_font_file(stem: str) -> Path | None:
+    """Locate a DejaVu font file by stem, searching the usual font dirs."""
+    for base in ("/usr/share/fonts", "/usr/local/share/fonts"):
+        for hit in Path(base).rglob(f"{stem}.ttf"):
+            return hit
+    return None
 
 
-SERIF_B = lambda s: font("DejaVuSerif-Bold.ttf", s)
-SERIF = lambda s: font("DejaVuSerif.ttf", s)
-SERIF_I = lambda s: font("DejaVuSerif-Italic.ttf", s)
-SANS = lambda s: font("DejaVuSans.ttf", s)
-SANS_B = lambda s: font("DejaVuSans-Bold.ttf", s)
+def load_font(stem: str, size: int) -> ImageFont.FreeTypeFont:
+    path = _find_font_file(stem)
+    if path is None:
+        return ImageFont.load_default()
+    return ImageFont.truetype(str(path), size)
 
 
-def wrap(draw, text, fnt, width):
-    """Greedy word wrap; returns a list of lines that fit `width`."""
-    lines, cur = [], ""
+# ---------------------------------------------------------------- text helpers
+
+def wrap_text(draw: ImageDraw.ImageDraw, text: str,
+              font: ImageFont.FreeTypeFont, width: int) -> list[str]:
+    """Greedy word wrap: pack as many whole words per line as fit."""
+    lines: list[str] = []
+    current = ""
     for word in text.split():
-        trial = f"{cur} {word}".strip()
-        if draw.textlength(trial, font=fnt) <= width or not cur:
-            cur = trial
+        trial = f"{current} {word}".strip()
+        if not current or draw.textlength(trial, font=font) <= width:
+            current = trial
         else:
-            lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
     return lines
 
 
-def para(draw, x, y, text, fnt, width, fill=INK, leading=None):
-    """Draw wrapped text; returns the y just below the last line."""
-    leading = leading or int(fnt.size * 1.22)
-    for line in wrap(draw, text, fnt, width):
-        draw.text((x, y), line, font=fnt, fill=fill)
-        y += leading
-    return y
+def draw_tracked(draw: ImageDraw.ImageDraw, x: float, y: float, text: str,
+                 font: ImageFont.FreeTypeFont, fill: tuple, tracking: int = 2) -> None:
+    """Draw text with extra space between letters (kicker style)."""
+    for char in text:
+        draw.text((x, y), char, font=font, fill=fill)
+        x += draw.textlength(char, font=font) + tracking
 
 
-def rule(draw, x, y, width, fill=CHARCOAL, px=2):
-    draw.rectangle([x, y, x + width, y + px - 1], fill=fill)
+def tracked_width(draw: ImageDraw.ImageDraw, text: str,
+                  font: ImageFont.FreeTypeFont, tracking: int = 2) -> float:
+    total = sum(draw.textlength(ch, font=font) for ch in text)
+    return total + tracking * max(len(text) - 1, 0)
 
 
-def kicker(draw, x, y, text, size=14):
-    fnt = SANS_B(size)
-    draw.text((x, y), text.upper(), font=fnt, fill=AMBER_DARK)
-    return y + int(size * 1.55)
-
-
-def cover_crop(img, tw, th):
-    """Centre-crop to the target aspect, then resize."""
-    sw, sh = img.size
-    target = tw / th
-    if sw / sh > target:
-        nw = int(sh * target)
-        box = ((sw - nw) // 2, 0, (sw - nw) // 2 + nw, sh)
+def centre_x(draw: ImageDraw.ImageDraw, text: str,
+             font: ImageFont.FreeTypeFont, tracking: int = 0) -> float:
+    if tracking:
+        width = tracked_width(draw, text, font, tracking)
     else:
-        nh = int(sw / target)
-        box = (0, (sh - nh) // 2, sw, (sh - nh) // 2 + nh)
-    return img.crop(box).resize((tw, th), Image.LANCZOS)
+        width = draw.textlength(text, font=font)
+    return (PAGE_W - width) / 2
 
 
-def photo(draw, canvas, path, x, y, w, h, caption=None):
+# ---------------------------------------------------------------- photos
+
+def photo_panel(path: Path, width: int, height: int) -> Image.Image:
+    """Centre-crop a photo to the target aspect, then scale it down."""
     img = Image.open(path).convert("RGB")
-    canvas.paste(cover_crop(img, w, h), (x, y))
-    draw.rectangle([x, y, x + w - 1, y + h - 1], outline=CHARCOAL, width=2)
-    if caption:
-        draw.text((x, y + h + 5), caption, font=SERIF_I(12), fill=MUTED)
-        return y + h + 22
-    return y + h
+    want = width / height
+    w, h = img.size
+    if w / h > want:  # too wide: trim the sides
+        new_w = int(h * want)
+        left = (w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, h))
+    else:  # too tall: trim top and bottom
+        new_h = int(w / want)
+        top = (h - new_h) // 2
+        img = img.crop((0, top, w, top + new_h))
+    return img.resize((width, height), Image.LANCZOS)
 
 
-def story(draw, canvas, x, y, kicker_text, img_path, caption,
-          headline, deck, head_size=24, photo_h=178):
-    """One photo story in a column; returns the y below it."""
-    y = kicker(draw, x, y, kicker_text)
-    y = photo(draw, canvas, img_path, x, y + 2, COL, photo_h, caption)
-    y = para(draw, x, y + 6, headline, SERIF_B(head_size), COL,
-             leading=head_size + 6)
-    y = para(draw, x, y + 6, deck, SANS(14), COL, fill=BODY, leading=19)
+# ---------------------------------------------------------------- column drawing
+
+def draw_photo_story(draw, page, x, story, y_top, fonts):
+    """One top-row story: kicker, photo, caption, headline, body."""
+    kicker_font, caption_font, headline_font, body_font = fonts
+    draw_tracked(draw, x, y_top, story["kicker"], kicker_font, AMBER)
+    y = y_top + 24
+    panel = photo_panel(ASSETS / story["photo"], COL_W, PHOTO_H)
+    page.paste(panel, (x, y))
+    draw.rectangle([x, y, x + COL_W - 1, y + PHOTO_H - 1], outline=INK, width=1)
+    y += PHOTO_H + 8
+    for line in wrap_text(draw, story["caption"], caption_font, COL_W):
+        draw.text((x, y), line, font=caption_font, fill=GREY)
+        y += 18
+    y += 6
+    for line in wrap_text(draw, story["headline"], headline_font, COL_W):
+        draw.text((x, y), line, font=headline_font, fill=INK)
+        y += 33
+    y += 6
+    for line in wrap_text(draw, story["body"], body_font, COL_W):
+        draw.text((x, y), line, font=body_font, fill=BODY_INK)
+        y += 19
     return y
 
 
-def text_story(draw, x, y, kicker_text, headline, deck):
-    """One text-only story in a column; returns the y below it."""
-    y = kicker(draw, x, y, kicker_text)
-    y = para(draw, x, y + 2, headline, SERIF_B(21), COL, leading=26)
-    y = para(draw, x, y + 5, deck, SANS(14), COL, fill=BODY, leading=19)
+def draw_text_story(draw, x, story, y_top, fonts):
+    """One lower-row story: kicker, headline, body (no photo)."""
+    kicker_font, headline_font, body_font = fonts
+    draw_tracked(draw, x, y_top, story["kicker"], kicker_font, AMBER)
+    y = y_top + 24
+    for line in wrap_text(draw, story["headline"], headline_font, COL_W):
+        draw.text((x, y), line, font=headline_font, fill=INK)
+        y += 29
+    y += 6
+    for line in wrap_text(draw, story["body"], body_font, COL_W):
+        draw.text((x, y), line, font=body_font, fill=BODY_INK)
+        y += 19
     return y
 
 
-def build():
-    canvas = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(canvas)
-    xs = [MARGIN, MARGIN + COL + GUT, MARGIN + 2 * (COL + GUT)]
+def draw_brief_item(draw, x, y, width, place, text, fonts):
+    """One IN BRIEF item: amber square bullet, bold place name, body text."""
+    bold_font, body_font = fonts
+    bullet = 8
+    draw.rectangle([x, y + 5, x + bullet - 1, y + 5 + bullet - 1], fill=AMBER)
+    tx = x + bullet + 8
+    tw = width - (bullet + 8)
+    lead = f"{place} — "
+    lines = wrap_text(draw, lead + text, body_font, tw)
+    for i, line in enumerate(lines):
+        if i == 0:
+            draw.text((tx, y), lead, font=bold_font, fill=INK)
+            rest = line[len(lead):]
+            rx = tx + draw.textlength(lead, font=bold_font)
+            draw.text((rx, y), rest, font=body_font, fill=BODY_INK)
+        else:
+            draw.text((tx, y), line, font=body_font, fill=BODY_INK)
+        y += 19
+    return y
 
-    # ---- Masthead: centred, charcoal + amber ----------------------
-    rule(d, MARGIN, 20, CONTENT, fill=CHARCOAL, px=4)
-    rule(d, MARGIN, 27, CONTENT, fill=AMBER, px=2)
-    mast = SERIF_B(52)
-    title = "THE GLOBE COURIER"
-    d.text(((W - d.textlength(title, font=mast)) / 2, 38), title,
-           font=mast, fill=INK)
-    date_f = SANS_B(18)
-    date_t = "MONDAY, 23 NOVEMBER 2026"
-    sub_f = SANS(18)
-    sub_t = "  \u2022  WORLD NEWS IN ONE PAGE"
-    total = d.textlength(date_t, font=date_f) + d.textlength(sub_t, font=sub_f)
-    x = (W - total) / 2
-    d.text((x, 102), date_t, font=date_f, fill=AMBER_DARK)
-    d.text((x + d.textlength(date_t, font=date_f), 102), sub_t,
-           font=sub_f, fill=MUTED)
-    rule(d, MARGIN, 132, CONTENT, fill=AMBER, px=2)
-    rule(d, MARGIN, 137, CONTENT, fill=CHARCOAL, px=1)
 
-    # ---- Row A: three photo stories; lead in the centre -----------
-    y0 = 152
-    antalya = ASSETS / "media-generation-panel-antalya-0-99704f85-53f1-4232-8983-529e92c3f1d0.webp"
-    hormuz = ASSETS / "media-generation-panel-hormuz-0-7f93a5ea-b615-43e0-a324-34b8ca01c55c.webp"
-    benghazi = ASSETS / "media-generation-panel-benghazi-0-3e4ad8ef-b714-417f-b2e8-f3f865e50440.webp"
-    end_l = story(
-        d, canvas, xs[0], y0, "Strait of Hormuz", hormuz,
-        "A tanker in the Strait of Hormuz at dawn.",
-        "Two more tankers hit mines as the strait burns",
-        "Two supertankers catch fire after striking naval mines east of "
-        "Hormuz on Sunday, and UK maritime authorities report projectile "
-        "strikes near Khasab. Attacks on shipping are at their highest "
-        "level since the war began.",
-        head_size=24)
-    end_c = story(
-        d, canvas, xs[1], y0, "Antalya \u2014 Lead story", antalya,
-        "The COP31 plenary hall in Antalya, emptying.",
-        "COP31 collapses: no deal on fossil fuels",
-        "After two weeks and record overtime, the climate summit ends "
-        "without an overarching pact \u2014 the first such failure since "
-        "Copenhagen in 2009. The EU, the UK and island states reject a "
-        "text that never mentions fossil fuels.",
-        head_size=27)
-    end_r = story(
-        d, canvas, xs[2], y0, "Benghazi", benghazi,
-        "A warship listing in Benghazi harbour at dawn.",
-        "Russian warship sunk by sea drones off Libya",
-        "The corvette Merkury capsizes and sinks after suspected Ukrainian "
-        "sea drones strike it in port; a second vessel is hit hours later. "
-        "Libya asks the UN to investigate.",
-        head_size=24)
-    row_a_end = max(end_l, end_c, end_r)
+# ---------------------------------------------------------------- page
 
-    # ---- Vertical separators between the columns ------------------
-    for gx in (MARGIN + COL + GUT // 2, MARGIN + 2 * COL + 3 * GUT // 2):
-        d.line([(gx, y0), (gx, row_a_end)], fill=FAINT, width=1)
+def render() -> Image.Image:
+    page = Image.new("RGB", (PAGE_W, PAGE_H), PAPER)
+    draw = ImageDraw.Draw(page)
 
-    # ---- Row B: three text stories --------------------------------
-    y = row_a_end + 14
-    rule(d, MARGIN, y, CONTENT, fill=FAINT, px=1)
-    y += 14
-    end_l = text_story(
-        d, xs[0], y, "Brussels",
-        "NATO meets today after Russian missiles land in Poland",
-        "Prosecutors confirm all three objects that fell on Friday were "
-        "Russian Kh-101 cruise missiles. The North Atlantic Council holds "
-        "an emergency session in Brussels.")
-    end_c = text_story(
-        d, xs[1], y, "Sinaloa",
-        "Mexico captures \u2018El Chapo Isidro\u2019 in deadly raid",
-        "FBI most-wanted fugitive Fausto Isidro Meza Flores is seized in "
-        "Guasave; 11 people are killed, four of them soldiers. US "
-        "intelligence helped plan the raid.")
-    end_r = text_story(
-        d, xs[2], y, "Kyiv region",
-        "Drone hits apartment block; 11 missing in the rubble",
-        "A Russian drone strikes a five-storey block in Dymer, north of "
-        "Kyiv, early on Sunday, killing two. Rescuers search for "
-        "survivors, including two children.")
-    row_b_end = max(end_l, end_c, end_r)
+    masthead_font = load_font("DejaVuSerif-Bold", 62)
+    date_font = load_font("DejaVuSans-Bold", 19)
+    kicker_font = load_font("DejaVuSans-Bold", 15)
+    caption_font = load_font("DejaVuSerif-Italic", 13)
+    headline_font = load_font("DejaVuSerif-Bold", 28)
+    headline2_font = load_font("DejaVuSerif-Bold", 24)
+    body_font = load_font("DejaVuSerif", 14)
+    brief_bold_font = load_font("DejaVuSerif-Bold", 14)
+    chip_font = load_font("DejaVuSans-Bold", 15)
+    footer_font = load_font("DejaVuSans", 13)
+    tagline_font = load_font("DejaVuSans-Bold", 14)
 
-    # ---- In brief --------------------------------------------------
-    y = row_b_end + 14
-    rule(d, MARGIN, y, CONTENT, fill=FAINT, px=1)
+    # --- top rules + masthead + dateline + double rule
+    draw.rectangle([MARGIN, 20, MARGIN + CONTENT_W - 1, 22], fill=CHARCOAL)
+    draw.line([MARGIN, 27, MARGIN + CONTENT_W - 1, 27], fill=AMBER_RULE, width=1)
+    draw.text((centre_x(draw, MASTHEAD, masthead_font), 36),
+              MASTHEAD, font=masthead_font, fill=INK)
+    date_w = draw.textlength(DATE_LINE, font=date_font)
+    tail_w = draw.textlength(DATE_TAIL, font=date_font)
+    total = date_w + tail_w
+    x0 = (PAGE_W - total) / 2
+    draw.text((x0, 106), DATE_LINE, font=date_font, fill=AMBER)
+    draw.text((x0 + date_w, 106), DATE_TAIL, font=date_font, fill=GREY)
+    draw.rectangle([MARGIN, 128, MARGIN + CONTENT_W - 1, 129], fill=CHARCOAL)
+    draw.line([MARGIN, 134, MARGIN + CONTENT_W - 1, 134], fill=AMBER_RULE, width=1)
+
+    # --- row A: three photo stories, lead in the centre column
+    col_x = [MARGIN, MARGIN + COL_W + GUTTER, MARGIN + 2 * (COL_W + GUTTER)]
+    row_a_top = 148
+    bottoms = []
+    for x, story in zip(col_x, TOP_STORIES):
+        bottoms.append(draw_photo_story(
+            draw, page, x, story, row_a_top,
+            (kicker_font, caption_font, headline_font, body_font)))
+    row_a_bottom = max(bottoms)
+    # faint vertical separators between the columns
+    for sep_x in (col_x[1] - GUTTER // 2 - 1, col_x[2] - GUTTER // 2 - 1):
+        draw.line([sep_x, row_a_top, sep_x, row_a_bottom], fill=HAIRLINE, width=1)
+
+    # --- row B: three text stories
+    y = row_a_bottom + 12
+    draw.line([MARGIN, y, MARGIN + CONTENT_W - 1, y], fill=HAIRLINE, width=1)
+    row_b_top = y + 12
+    bottoms_b = []
+    for x, story in zip(col_x, LOWER_STORIES):
+        bottoms_b.append(draw_text_story(
+            draw, x, story, row_b_top,
+            (kicker_font, headline2_font, body_font)))
+    row_b_bottom = max(bottoms_b)
+    for sep_x in (col_x[1] - GUTTER // 2 - 1, col_x[2] - GUTTER // 2 - 1):
+        draw.line([sep_x, row_b_top, sep_x, row_b_bottom], fill=HAIRLINE, width=1)
+
+    # --- IN BRIEF band
+    y = row_b_bottom + 12
+    draw.line([MARGIN, y, MARGIN + CONTENT_W - 1, y], fill=HAIRLINE, width=1)
     y += 12
     chip = "IN BRIEF"
-    chip_f = SANS_B(14)
-    chip_w = d.textlength(chip, font=chip_f) + 20
-    d.rectangle([MARGIN, y, MARGIN + chip_w, y + 23], fill=CHARCOAL)
-    d.text((MARGIN + 10, y + 4), chip, font=chip_f, fill=(232, 178, 74))
-    y += 31
-    briefs = [
-        ("GENEVA", "128 states agree to pursue rules on killer robots by 2028."),
-        ("JUBA", "24 civilians killed in fresh violence in South Sudan."),
-        ("CIKANDE", "Seven bodies recovered, dozens missing after a factory fire in Indonesia."),
-        ("OKINAWA", "Shuri Castle\u2019s restored main hall opens, seven years after fire."),
-    ]
+    chip_w = draw.textlength(chip, font=chip_font) + 28
+    draw.rectangle([MARGIN, y, MARGIN + chip_w - 1, y + 25], fill=CHARCOAL)
+    draw.text((MARGIN + 14, y + 5), chip, font=chip_font, fill=AMBER)
+    y += 25 + 10
+    brief_w = (CONTENT_W - GUTTER) // 2
+    row_ends = []
     for row in range(2):
-        pair = briefs[row * 2:(row + 1) * 2]
-        wrapped = []
-        for city, text in pair:
-            off = d.textlength(city + " \u2014 ", font=SANS_B(13))
-            lines = wrap(d, text, SANS(13), COL + GUT - 14 - off)
-            wrapped.append((city, lines, off))
-        row_h = max(len(lines) for _, lines, _ in wrapped) * 16
-        for i, (city, lines, off) in enumerate(wrapped):
-            bx = MARGIN + i * (COL + GUT)
-            d.text((bx, y), "\u25aa ", font=SANS_B(13), fill=AMBER_DARK)
-            cx = bx + 14
-            d.text((cx, y), city + " \u2014 ", font=SANS_B(13), fill=INK)
-            yy = y
-            for j, line in enumerate(lines):
-                d.text((cx + (off if j == 0 else 0), yy), line,
-                       font=SANS(13), fill=BODY)
-                yy += 16
-        y += row_h + 8
+        left = BRIEF_ITEMS[row * 2]
+        right = BRIEF_ITEMS[row * 2 + 1]
+        end_l = draw_brief_item(draw, MARGIN, y, brief_w, left[0], left[1],
+                                (brief_bold_font, body_font))
+        end_r = draw_brief_item(draw, MARGIN + brief_w + GUTTER, y, brief_w,
+                                right[0], right[1],
+                                (brief_bold_font, body_font))
+        row_ends.append(max(end_l, end_r))
+        y = max(end_l, end_r) + 8
 
-    # ---- Footer ----------------------------------------------------
-    rule(d, MARGIN, 978, CONTENT, fill=FAINT, px=1)
-    foot = ("Sources: CNN \u2022 Reuters \u2022 Le Monde \u2022 AP \u2022 AFP \u2022 "
-            "UKMTO \u2022 The Times")
-    ff = SANS(11)
-    d.text(((W - d.textlength(foot, font=ff)) / 2, 986), foot,
-           font=ff, fill=MUTED)
-    tag = "THE GLOBE COURIER \u2014 ONE DAY. ONE PAGE."
-    tf = SANS_B(11)
-    d.text(((W - d.textlength(tag, font=tf)) / 2, 1002), tag,
-           font=tf, fill=AMBER_DARK)
+    # --- footer
+    y = row_ends[-1] + 6
+    draw.line([MARGIN, y, MARGIN + CONTENT_W - 1, y], fill=HAIRLINE, width=1)
+    draw.text((centre_x(draw, SOURCES, footer_font), y + 10),
+              SOURCES, font=footer_font, fill=GREY)
+    draw.text((centre_x(draw, TAGLINE, tagline_font), y + 32),
+              TAGLINE, font=tagline_font, fill=AMBER)
+    return page
 
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "entry.png"
-    canvas.save(out, "PNG", optimize=True)
-    size = out.stat().st_size
-    print(f"wrote {out} {size} bytes")
-    if size > 1_048_576:
-        canvas.save(out, "JPEG", quality=88, optimize=True)
-        print(f"PNG over 1 MiB; re-saved as JPEG bytes: {out.stat().st_size}")
+
+def main(argv: list[str]) -> int:
+    out = Path(argv[1]) if len(argv) > 1 else HERE / "entry.png"
+    img = render()
+    img.save(out, format="PNG")
+    print(f"wrote {out} ({img.size[0]}x{img.size[1]})")
+    return 0
 
 
 if __name__ == "__main__":
-    build()
+    raise SystemExit(main(sys.argv))
